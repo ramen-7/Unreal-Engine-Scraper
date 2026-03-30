@@ -1,0 +1,63 @@
+<!-- source: https://dev.epicgames.com/documentation/en-us/unreal-engine/node-reference/ControlRig/PositionConstraint?application_version=5.7 -->
+
+# Position Constraint
+
+1. ![Epic Games](https://edc-cdn.net/assets/images/logo-epic.svg)[Developer](/)
+2. [Documentation](/documentation/ "Documentation")
+3. Unreal Engine
+   * [Unreal Engine](/documentation/en-us/unreal-engine)
+   * [Fortnite](/documentation/en-us/fortnite)
+   * [Twinmotion](/documentation/en-us/twinmotion)
+   * [MetaHuman](/documentation/en-us/metahuman)
+   * [RealityScan](/documentation/en-us/realityscan)
+   * [RealityScan Mobile](/documentation/en-us/realityscan-mobile)
+   * [Fab](/documentation/en-us/fab)
+4. Position Constraint
+
+# Position Constraint
+
+Constrains an item's position to multiple items' positions
+
+On this page
+
+### Description
+
+Constrains an item's position to multiple items' positions
+
+### Information
+
+|  |  |
+| --- | --- |
+| Plugin | [ControlRig](/documentation/en-us/unreal-engine/API/PluginIndex/ControlRig) |
+| Category | Constraints |
+| Tags | Parent,Translation |
+| Type | [FRigUnit\_PositionConstraintLocalSpaceOffset](/documentation/en-us/unreal-engine/API/Plugins/ControlRig/FRigUnit_PositionConstraintLocal-) |
+
+### IO
+
+| Name | Description | Permitted Types | Default Value |
+| --- | --- | --- | --- |
+| ExecutePin | This property is used to chain multiple mutable units together | [Execute Context](/documentation/en-us/unreal-engine/API/Plugins/RigVM/FRigVMExecuteContext) |  |
+
+### Inputs
+
+| Name | Description | Permitted Types | Default Value |
+| --- | --- | --- | --- |
+| Child | The child to constrain | [Rig Element Key](/documentation/en-us/unreal-engine/API/Plugins/ControlRig/FRigElementKey) | (Type=Bone,Name="") |
+| bMaintainOffset | If True the offset will be computed based on the current delta between each child and parent | [bool](/documentation/en-us/unreal-engine/API/Runtime/Core) | True |
+| Filter | The filter to apply on the transform | [Filter Option Per Axis](/documentation/en-us/unreal-engine/API/Runtime/AnimationCore/FFilterOptionPerAxis) | (bX=True,bY=True,bZ=True) |
+| Parents | The array of parents to constrain the child to | [TArray](/documentation/en-us/unreal-engine/API/Runtime/Core/TArray)<[FConstraintParent](/documentation/en-us/unreal-engine/API/Plugins/ControlRig/FConstraintParent)> | (()) |
+| Weight | The weight to use when applying the resulting transform to the child | [float](/documentation/en-us/unreal-engine/API/Runtime/uLangCore) | 1.000000 |
+
+---
+
+Ask questions and help your peers [Developer Forums](https://forums.unrealengine.com/categories?tag=unreal-engine)
+
+Write your own tutorials or read those from others [Learning Library](https://dev.epicgames.com/community/unreal-engine/learning)
+
+On this page
+
+* [Description](/documentation/en-us/unreal-engine/node-reference/ControlRig/PositionConstraint?application_version=5.7#description)
+* [Information](/documentation/en-us/unreal-engine/node-reference/ControlRig/PositionConstraint?application_version=5.7#information)
+* [IO](/documentation/en-us/unreal-engine/node-reference/ControlRig/PositionConstraint?application_version=5.7#io)
+* [Inputs](/documentation/en-us/unreal-engine/node-reference/ControlRig/PositionConstraint?application_version=5.7#inputs)
