@@ -40,6 +40,9 @@ def _is_quota_or_block_error(msg: str) -> bool:
             "blocked",
             "temporarily unavailable",
             "daily limit",
+            "resourceexhausted",
+            "exceeded",
+            "not found for api version",
         ]
     )
 
@@ -50,8 +53,8 @@ class ProviderRouter:
         state_path: Path,
         *,
         gemini_free_hours: float = 24.0,
-        openai_model: str = "gpt-4o-mini",
-        gemini_model: str = "gemini-1.5-flash",
+        openai_model: str = "gpt-5.4-mini",
+        gemini_model: str = "gemini-2.5-pro",
     ):
         self.state_path = state_path
         self.gemini_free_hours = gemini_free_hours
@@ -167,7 +170,6 @@ class LLMClient:
             try:
                 genai = self._gemini_client()
                 model = genai.GenerativeModel(sel.model)
-                # Gemini supports a single combined prompt; we include system instructions explicitly.
                 full_prompt = f"{system_prompt}\n\n{user_prompt}"
                 resp = model.generate_content(full_prompt)
                 txt = getattr(resp, "text", None) or str(resp)
@@ -176,7 +178,13 @@ class LLMClient:
                 msg = str(e)
                 if _is_quota_or_block_error(msg):
                     self.router.mark_gemini_exhausted(msg)
-                raise
+                    sel = ProviderSelection(
+                        provider="openai",
+                        model=self.router.openai_model,
+                        display_name=f"OpenAI ({self.router.openai_model})",
+                    )
+                else:
+                    raise
 
         # OpenAI
         try:

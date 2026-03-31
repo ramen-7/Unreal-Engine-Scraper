@@ -18,9 +18,6 @@ from .embeddings import LocalEmbeddings
 
 @dataclass(frozen=True)
 class Chunk:
-    # Immutable chunk + metadata:
-    # - makes it harder to accidentally mutate the text used for indexing
-    # - allows safe reuse when building/storing metadata
     chunk_id: int
     text: str
     metadata: Dict[str, Any]
@@ -37,8 +34,6 @@ def _read_text(p: Path) -> str:
 
 
 def _chunk_text_by_paragraphs(text: str, *, chunk_size: int, overlap: int) -> List[str]:
-    # chunk_size/overlap are in characters (approx). This keeps the implementation simple
-    # while still respecting doc structure via paragraph boundaries.
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
     chunks: List[str] = []
     buf: List[str] = []
@@ -57,32 +52,33 @@ def _chunk_text_by_paragraphs(text: str, *, chunk_size: int, overlap: int) -> Li
     i = 0
     while i < len(paragraphs):
         p = paragraphs[i]
-        if buf_len + len(p) + 2 > chunk_size and buf:
+        fits = buf_len + len(p) + 2 <= chunk_size
+        if fits:
+            buf.append(p)
+            buf_len += len(p) + 2
+            i += 1
+            continue
+        if buf:
             flush()
-            # Overlap: we keep a small tail of previous paragraphs to preserve context.
-            # (Heuristic: “last few paras” works well for documentation text.)
             if overlap > 0:
-                tail = paragraphs[max(0, i - 3) : i]  # heuristic: keep last few paras
-                buf = []
-                buf_len = 0
+                tail = paragraphs[max(0, i - 3) : i]
                 for t in tail:
                     if buf_len + len(t) + 2 > overlap:
                         break
                     buf.append(t)
                     buf_len += len(t) + 2
-            continue
-        buf.append(p)
-        buf_len += len(p) + 2
+            if buf_len + len(p) + 2 <= chunk_size:
+                continue
+            flush()
+        for start in range(0, len(p), chunk_size):
+            chunks.append(p[start : start + chunk_size])
         i += 1
 
     flush()
-    # final merge guard: avoid many tiny chunks
     return [c for c in chunks if len(c.strip()) >= 80]
 
 
 def _clean_markdown(text: str) -> str:
-    # If markdown contains HTML fragments, strip them lightly.
-    # This avoids feeding raw HTML tags into embeddings/prompt context.
     if "<" in text and ">" in text:
         soup = BeautifulSoup(text, "html.parser")
         return soup.get_text("\n").strip()
@@ -91,29 +87,17 @@ def _clean_markdown(text: str) -> str:
 
 @dataclass(frozen=True)
 class VectorStoreConfig:
-    # Immutable config for the index:
-    # - changing chunking/top_k/etc should trigger rebuilds
-    # - freezing avoids accidental runtime drift
     vector_dir: Path
-    # Source roots:
     markdown_root: Path
     specifiers_jsonl: Path
     unreal_specifiers_root: Path
-    # Source switch:
-    # - include both `scraped_data/content/unreal_specifiers.jsonl` AND the
-    #   `unreal_specifiers/` markdown tree (useful if you want redundancy or more granularity).
     include_unreal_specifiers_dir: bool = True
 
-    # Chunking / indexing:
     chunk_size: int = 1400
     chunk_overlap: int = 200
 
-    # Retrieval:
     top_k: int = 6
 
-    # Safety limit:
-    # Embedding all chunks can OOM in free Docker / small RAM environments.
-    # When set, vectorstore build stops after embedding this many chunks total.
     max_chunks: int | None = None
 
 
@@ -161,7 +145,6 @@ class VectorStore:
     def _source_chunks(self) -> Iterable[Chunk]:
         chunk_id = 0
 
-        # 1) scraped_data/markdown_by_path/**/*.md
         if self.cfg.markdown_root.exists():
             for p in _iter_markdown_files(self.cfg.markdown_root):
                 rel = p.relative_to(self.cfg.markdown_root)
@@ -186,7 +169,6 @@ class VectorStore:
                     )
                     chunk_id += 1
 
-        # 2) scraped_data/content/unreal_specifiers.jsonl
         if self.cfg.specifiers_jsonl.exists():
             with open(self.cfg.specifiers_jsonl, "r", encoding="utf-8") as f:
                 for line in f:
@@ -222,7 +204,6 @@ class VectorStore:
                         )
                         chunk_id += 1
 
-        # 3) unreal_specifiers/ (directory of markdown)
         if self.cfg.include_unreal_specifiers_dir and self.cfg.unreal_specifiers_root.exists():
             for p in _iter_markdown_files(self.cfg.unreal_specifiers_root):
                 rel = p.relative_to(self.cfg.unreal_specifiers_root)
@@ -255,16 +236,13 @@ class VectorStore:
                 "faiss is not installed. Install faiss-cpu to build the vector index."
             )
         if self.cfg.vector_dir.exists() and not force:
-            # If partial index exists, we’ll rebuild.
             if self.index_path.exists() and self.meta_path.exists():
                 return
         self.cfg.vector_dir.mkdir(parents=True, exist_ok=True)
 
-        # Stream build to avoid holding every chunk in memory.
         index: faiss.Index | None = None
         dim: int | None = None
         chunk_count = 0
-        # Small batch keeps memory bounded and makes embedding batching efficient.
         batch_size = 16
 
         with open(self.meta_path, "w", encoding="utf-8") as meta_f:
@@ -275,17 +253,12 @@ class VectorStore:
                 if not batch:
                     return
                 texts = [c.text for c in batch]
-                # Sentences are L2-normalized so inner product == cosine similarity.
                 vecs = self.embeddings.embed_documents(texts).astype("float32", copy=False)
                 faiss.normalize_L2(vecs)
                 if index is None:
                     dim = int(vecs.shape[1])
-                    # IndexFlatIP + normalized vectors => cosine similarity retrieval.
                     index = faiss.IndexFlatIP(dim)
                 index.add(vecs)
-                # Persist metadata + short snippet only:
-                # - keeps disk/memory lower
-                # - good enough for “retrieved context snippets” in chat responses
                 for c in batch:
                     snippet = c.text[:1200] if len(c.text) > 1200 else c.text
                     meta_f.write(
@@ -339,7 +312,6 @@ class VectorStore:
             top_k = self.cfg.top_k
 
         q = query_embedding.astype("float32", copy=False)
-        # Normalize query embedding so IndexFlatIP behaves like cosine similarity.
         faiss.normalize_L2(q.reshape(1, -1))
 
         scores, ids = self._index.search(q.reshape(1, -1), top_k)
@@ -352,4 +324,3 @@ class VectorStore:
             meta_out["score"] = float(score)
             results.append(meta_out)
         return results
-

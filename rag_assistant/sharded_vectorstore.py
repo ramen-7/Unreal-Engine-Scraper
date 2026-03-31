@@ -33,17 +33,12 @@ class ShardedVectorStoreConfig:
     chunk_size: int = 2200
     chunk_overlap: int = 200
 
-    # Sharding strategy for markdown tree:
-    # shard_key = rel.parts[shard_level_index] if it exists, else rel.parts[0]
-    # Using level_index=1 avoids the top constant folder like
-    # "Unreal Engine 5.7 Documentation".
+   
     shard_level_index: int = 1
 
-    # How many shards to search per query.
-    shard_top_n: int = 3
+    # selecting top 5 shards 
+    shard_top_n: int = 5
 
-    # Optional safety limit:
-    # If set, only embed/build up to this many total chunks across all shards.
     max_chunks: int | None = None
 
 
@@ -55,7 +50,7 @@ class ShardCandidate:
 
 class ShardedVectorStore:
     """
-    Sharded FAISS index that avoids OOM:
+    Sharded FAISS index:
     - router index: 1 vector per shard (mean embedding)
     - shard indexes: chunk-level FAISS per shard, built sequentially
     - at query time: load only top-N shards and search inside them
@@ -120,21 +115,26 @@ class ShardedVectorStore:
         overlap = self.cfg.chunk_overlap
         while i < len(paragraphs):
             p = paragraphs[i]
-            if buf_len + len(p) + 2 > chunk_size and buf:
+            fits = buf_len + len(p) + 2 <= chunk_size
+            if fits:
+                buf.append(p)
+                buf_len += len(p) + 2
+                i += 1
+                continue
+            if buf:
                 flush()
                 if overlap > 0:
-                    # Keep a small tail of previous paragraphs (heuristic).
                     tail = paragraphs[max(0, i - 3) : i]
-                    buf = []
-                    buf_len = 0
                     for t in tail:
                         if buf_len + len(t) + 2 > overlap:
                             break
                         buf.append(t)
                         buf_len += len(t) + 2
-                continue
-            buf.append(p)
-            buf_len += len(p) + 2
+                if buf_len + len(p) + 2 <= chunk_size:
+                    continue
+                flush()
+            for start in range(0, len(p), chunk_size):
+                chunks.append(p[start : start + chunk_size])
             i += 1
 
         flush()
@@ -263,19 +263,20 @@ class ShardedVectorStore:
         shard_keys = sorted(set(shard_keys) | spec_shards)
 
         total_shards = len(shard_keys)
-        log.info("Discovered %d shard keys to build", total_shards)
+        print(f"[sharded_vectorstore] Discovered {total_shards} shard keys to build", flush=True)
 
         total_embedded = 0
         batch_size = 32
 
         for shard_idx, shard_key in enumerate(shard_keys):
             if self.cfg.max_chunks is not None and total_embedded >= self.cfg.max_chunks:
-                log.info("Reached max_chunks=%d, stopping build", self.cfg.max_chunks)
+                print(f"[sharded_vectorstore] Reached max_chunks={self.cfg.max_chunks}, stopping build", flush=True)
                 break
 
-            log.info(
-                "[%d/%d] Building shard '%s' (total chunks so far: %d)",
-                shard_idx + 1, total_shards, shard_key, total_embedded,
+            print(
+                f"[sharded_vectorstore] [{shard_idx + 1}/{total_shards}] Building shard '{shard_key}' "
+                f"(total chunks so far: {total_embedded})",
+                flush=True,
             )
 
             try:
@@ -294,7 +295,7 @@ class ShardedVectorStore:
             total_embedded += chunks_in_shard
 
             if mean_vec is None or chunks_in_shard == 0:
-                log.info("  Shard '%s' produced 0 chunks, skipping", shard_key)
+                print(f"[sharded_vectorstore]   Shard '{shard_key}' produced 0 chunks, skipping", flush=True)
                 continue
 
             if router_index is None:
@@ -303,7 +304,7 @@ class ShardedVectorStore:
 
             router_index.add(mean_vec)
             router_meta.append({"shard_key": shard_key})
-            log.info("  Shard '%s' done: %d chunks", shard_key, chunks_in_shard)
+            print(f"[sharded_vectorstore]   Shard '{shard_key}' done: {chunks_in_shard} chunks", flush=True)
 
             gc.collect()
 
@@ -314,9 +315,9 @@ class ShardedVectorStore:
         self._router_index = router_index
         self._router_meta = router_meta
 
-        log.info(
-            "Build complete: %d shards, %d total chunks",
-            len(router_meta), total_embedded,
+        print(
+            f"[sharded_vectorstore] Build complete: {len(router_meta)} shards, {total_embedded} total chunks",
+            flush=True,
         )
 
     def _save_router(
@@ -358,6 +359,8 @@ class ShardedVectorStore:
                 shard_index = faiss.IndexFlatIP(shard_dim)
             shard_index.add(vecs)
             shard_meta.extend(chunk_rows)
+
+            # adding vectors to sum 
             if sum_vec is None:
                 sum_vec = vecs.sum(axis=0).astype("float32", copy=False)
             else:
@@ -472,7 +475,9 @@ class ShardedVectorStore:
             for row in shard_meta:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
+        # sum of all vectors being divided by the count to get a representative mean vector
         mean_vec = (sum_vec / float(count)).astype("float32", copy=False).reshape(1, -1)
+        # L2 normalization to allow for cosine similarity
         faiss.normalize_L2(mean_vec)
 
         del shard_index, shard_meta, texts_batch, rows_batch
@@ -488,7 +493,7 @@ class ShardedVectorStore:
         idx = self._router_index
         assert idx is not None
 
-        # Normalize for cosine similarity.
+        # L2 Normalize for cosine similarity.
         q = q_emb.astype("float32", copy=False).reshape(1, -1)
         faiss.normalize_L2(q)
 
@@ -513,7 +518,7 @@ class ShardedVectorStore:
         per_shard = max(1, int(np.ceil(top_k / float(len(candidates)))))
         merged: List[Dict[str, Any]] = []
 
-        # Normalize query embedding once.
+        # Normalize query embedding once
         q = query_embedding.astype("float32", copy=False).reshape(1, -1)
         faiss.normalize_L2(q)
 

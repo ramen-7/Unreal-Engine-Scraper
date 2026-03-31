@@ -7,7 +7,7 @@ DOCKERFILE="Dockerfile"
 ENV_FILE="${ENV_FILE:-.env}"
 
 PORT="${PORT:-7860}"
-DOCKER_MEMORY="${DOCKER_MEMORY:-4g}"
+DOCKER_MEMORY="${DOCKER_MEMORY:-}"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker CLI not found. Install Docker Desktop or fix your PATH."
@@ -28,13 +28,16 @@ echo "Stopping/removing container (if it exists): ${CONTAINER_NAME}"
 docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 
 echo "Rebuilding Docker image: ${IMAGE_NAME}"
-docker build -t "${IMAGE_NAME}" -f "${DOCKERFILE}" .
+if ! docker build -t "${IMAGE_NAME}" -f "${DOCKERFILE}" .; then
+  echo "Docker build FAILED. Try: docker system prune -f && then re-run."
+  exit 1
+fi
 
-echo "Starting container (memory limit: ${DOCKER_MEMORY})..."
+echo "Starting container (memory: ${DOCKER_MEMORY:-no limit})..."
 
 RUN_ARGS=(
   --name "${CONTAINER_NAME}"
-  --memory "${DOCKER_MEMORY}"
+  ${DOCKER_MEMORY:+--memory "${DOCKER_MEMORY}"}
   -p "${PORT}:7860"
   -v "$(pwd):/app"
   --env-file "${ENV_FILE}"

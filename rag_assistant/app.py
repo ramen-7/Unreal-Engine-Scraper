@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,25 +12,20 @@ from .embeddings import EmbeddingConfig
 from .rag_backend import RAGService
 
 
-def _messages_to_chatbot_pairs(messages: List[Dict[str, Any]]) -> List[List[str]]:
-    pairs: List[List[str]] = []
-    last_user: Optional[str] = None
+def _stored_to_chatbot(messages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
     for m in messages:
-        role = m.get("role")
+        role = m.get("role", "user")
         content = m.get("content", "")
-        if role == "user":
-            last_user = content
-        elif role == "assistant" and last_user is not None:
-            pairs.append([last_user, content])
-            last_user = None
-    return pairs
+        if role in ("user", "assistant") and content:
+            out.append({"role": role, "content": content})
+    return out
 
 
 def _compute_topic_id(chat_store: ChatStore, session_id: str, topic_new: bool) -> str:
     msgs = chat_store.get_messages(session_id)
     if topic_new:
         return uuid.uuid4().hex
-    # Continue the latest topic id if present.
     for m in reversed(msgs):
         tid = m.get("topic_id")
         if tid:
@@ -39,15 +33,9 @@ def _compute_topic_id(chat_store: ChatStore, session_id: str, topic_new: bool) -
     return uuid.uuid4().hex
 
 
-def _ensure_chat_loaded(chat_store: ChatStore, session_id: str) -> List[List[str]]:
-    stored_messages = chat_store.get_messages(session_id)
-    return _messages_to_chatbot_pairs(stored_messages)
-
-
 def build_app() -> gr.Blocks:
     repo_root = Path(".").resolve()
 
-    # Data roots are fixed: the assistant is tightly coupled to your scraped corpus.
     vector_dir = repo_root / "data" / "vectorstore"
     markdown_root = repo_root / "scraped_data" / "markdown_by_path"
     specifiers_jsonl = repo_root / "scraped_data" / "content" / "unreal_specifiers.jsonl"
@@ -70,24 +58,16 @@ def build_app() -> gr.Blocks:
     embedding_cfg = EmbeddingConfig(
         model_name=os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
     )
-    # Vectorstore rebuild is expensive, so keep it opt-in for deployment.
-    force_rebuild = os.getenv("FORCE_REBUILD_VECTORSTORE", "0") == "1"
-
-    # Memory safety defaults:
-    # If the full vectorstore index build OOMs inside Docker, reduce chunk count.
     include_unreal_specifiers_dir = os.getenv("INCLUDE_UNREAL_SPECIFIERS_DIR", "0") == "1"
     chunk_size = int(os.getenv("VSTORE_CHUNK_SIZE", "2200"))
     chunk_overlap = int(os.getenv("VSTORE_CHUNK_OVERLAP", "200"))
-    max_chunks_env = os.getenv("VSTORE_MAX_CHUNKS", "6000").strip()
+    max_chunks_env = os.getenv("VSTORE_MAX_CHUNKS", "none").strip()
     max_chunks = None if max_chunks_env.lower() in ("", "none", "null", "0") else int(max_chunks_env)
 
-    # Sharded vectorstore (recommended for Docker/free-tier):
-    # shard_strategy="sharded_by_path_level_1" => shard_key = rel.parts[1] (skip the constant top folder)
     shard_strategy = os.getenv("VSTORE_SHARD_STRATEGY", "sharded_by_path_level_1")
-    shard_top_n = int(os.getenv("VSTORE_SHARD_TOP_N", "3"))
+    shard_top_n = int(os.getenv("VSTORE_SHARD_TOP_N", "5"))
     shard_level_index = int(os.getenv("VSTORE_SHARD_LEVEL_INDEX", "1"))
 
-    # RAG service load/build:
     rag = RAGService(
         vector_dir=vector_dir,
         markdown_root=markdown_root,
@@ -95,7 +75,7 @@ def build_app() -> gr.Blocks:
         unreal_specifiers_root=unreal_specifiers_root,
         include_unreal_specifiers_dir=include_unreal_specifiers_dir,
         embedding_config=embedding_cfg,
-        force_rebuild_vectorstore=force_rebuild,
+        force_rebuild_vectorstore=False,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         max_chunks=max_chunks,
@@ -111,19 +91,17 @@ def build_app() -> gr.Blocks:
 
     def respond(
         message: str,
-        chat_history: List[List[str]],
+        chat_history: List[Dict[str, str]],
         request: gr.Request,
-    ) -> Tuple[List[List[str]], str, str]:
+    ) -> Tuple[List[Dict[str, str]], str, str]:
         if chat_history is None:
             chat_history = []
-        # Session id for persistence:
-        # Gradio provides stable identifiers; if not present, we generate a UUID.
+
         session_id = getattr(request, "session_hash", None) or getattr(request, "client_hash", None) or uuid.uuid4().hex
 
-        # Load stored history for prompt accuracy.
         stored_messages = chat_store.get_messages(session_id)
         if not chat_history and stored_messages:
-            chat_history = _messages_to_chatbot_pairs(stored_messages)
+            chat_history = _stored_to_chatbot(stored_messages)
 
         result = rag.answer(
             question=message,
@@ -133,49 +111,67 @@ def build_app() -> gr.Blocks:
             top_k=top_k,
         )
 
-        # We compute a topic id so the chat store can keep “topic boundaries”
-        # aligned with our embedding-based topic switching heuristic.
         topic_id = _compute_topic_id(chat_store, session_id, topic_new=result.topic_new)
 
         chat_store.append(session_id, role="user", content=message, topic_id=topic_id)
         chat_store.append(session_id, role="assistant", content=result.answer_text, topic_id=topic_id)
 
-        updated_chat_history = chat_history + [[message, result.answer_text]]
+        chat_history = chat_history + [
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": result.answer_text},
+        ]
 
-        # UI requirement: show which provider/model was used for this answer.
-        model_used = f"Model used: {result.provider_display}"
-        topic_line = f"Topic new: {result.topic_new} (similarity={result.topic_similarity:.3f})"
+        model_line = f"**{result.provider_display}** | Topic new: {result.topic_new} (sim={result.topic_similarity:.3f})"
 
-        sources_lines: List[str] = []
+        sources_parts: List[str] = []
         for r in result.retrieved:
             title = r.get("title") or "document"
             path = r.get("path") or ""
-            snippet = r.get("snippet") or ""
-            sources_lines.append(f"- {title} ({path})\n\n  {snippet}".rstrip())
+            score = r.get("score")
+            snippet = (r.get("snippet") or "")[:300]
+            score_str = f" ({score:.3f})" if score is not None else ""
+            sources_parts.append(
+                f"### {title}{score_str}\n"
+                f"`{path}`\n\n"
+                f"{snippet}{'...' if len(r.get('snippet', '')) > 300 else ''}"
+            )
 
-        sources_md = (
-            f"**{model_used}**\n\n"
-            f"{topic_line}\n\n"
-            f"**Retrieved context:**\n" + "\n".join(sources_lines)
-        )
+        sources_md = "\n\n---\n\n".join(sources_parts) if sources_parts else "*No documents retrieved*"
 
-        return updated_chat_history, model_used, sources_md
+        return chat_history, model_line, sources_md
 
-    with gr.Blocks(title="Unreal Engine RAG Assistant") as demo:
-        gr.Markdown("## Unreal Engine RAG Assistant")
+    css = """
+    .source-panel { max-height: 70vh; overflow-y: auto; }
+    """
+
+    with gr.Blocks(title="Unreal Engine RAG Assistant", css=css) as demo:
+        gr.Markdown("# Unreal Engine RAG Assistant")
         model_label = gr.Markdown("")
-        sources_box = gr.Markdown("")
 
-        chatbot = gr.Chatbot(label="Chat", show_copy_button=True)
-        msg = gr.Textbox(label="Ask a question", placeholder="Example: How do I use MeshWarp for deformations?")
-        send = gr.Button("Send")
+        with gr.Row(equal_height=True):
+            with gr.Column(scale=1):
+                chatbot = gr.Chatbot(label="Chat", height=500)
+                with gr.Row():
+                    msg = gr.Textbox(
+                        label="Ask a question",
+                        placeholder="e.g. How do I use MeshWarp for deformations?",
+                        scale=4,
+                    )
+                    send = gr.Button("Send", scale=1, variant="primary")
+
+            with gr.Column(scale=1):
+                sources_box = gr.Markdown(
+                    value="*Ask a question to see retrieved documents here.*",
+                    label="Retrieved Documents",
+                    elem_classes=["source-panel"],
+                )
 
         def on_send(message, chat_history, request: gr.Request):
-            return respond(message, chat_history, request)
+            history, model_md, sources_md = respond(message, chat_history, request)
+            return history, model_md, sources_md, ""
 
-        # Hook submit + button.
-        msg.submit(on_send, inputs=[msg, chatbot], outputs=[chatbot, model_label, sources_box], show_progress=True)
-        send.click(on_send, inputs=[msg, chatbot], outputs=[chatbot, model_label, sources_box], show_progress=True)
+        msg.submit(on_send, inputs=[msg, chatbot], outputs=[chatbot, model_label, sources_box, msg])
+        send.click(on_send, inputs=[msg, chatbot], outputs=[chatbot, model_label, sources_box, msg])
 
         gr.Examples(
             examples=[
@@ -191,10 +187,8 @@ def build_app() -> gr.Blocks:
 
 if __name__ == "__main__":
     demo = build_app()
-    # Public sharing off by default; only local container access.
     demo.queue().launch(
         server_name="0.0.0.0",
         server_port=int(os.getenv("PORT", "7860")),
         share=False,
     )
-
