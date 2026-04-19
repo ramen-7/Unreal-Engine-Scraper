@@ -37,10 +37,12 @@ DEFAULT_SYSTEM_PROMPT = (
         - Explain underlying mechanisms, not just surface behavior.
         - Use precise Unreal Engine terminology (e.g., CDO, serialization, reflection).
 
-        - Structure responses as:
+        - For technical questions structure responses as:
         1. Direct answer
         2. Explanation
         3. Optional implications
+
+        - For normal questions such as "Hi", "Can you help me with this?", etc, - reply with a normal response with an Explanation and Optional implications.
 
         Be concise and accurate.
     """
@@ -173,7 +175,7 @@ class RAGService:
         # 1) load persisted chat history
         # 2) detect new topic (embedding similarity)
         # 3) retrieve top-k chunks from vector store
-        # 4) build a prompt that forces the model to answer from retrieved context
+        # 4) force the model to answer from retrieved context
         # 5) call the LLM provider router (Gemini->OpenAI failover)
         stored = chat_store.get_messages(session_id)
 

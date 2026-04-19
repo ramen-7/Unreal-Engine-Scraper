@@ -176,7 +176,7 @@ def build_app() -> gr.Blocks:
         gr.Examples(
             examples=[
                 "What is CLASS_ConfigDoNotCheckDefaults?",
-                "How do I use Dataflow node MergeConvexHulls?",
+                "How do you create a custom physics constraint?",
                 "How do I set up a Blueprint to handle replicated events?",
             ],
             inputs=msg,

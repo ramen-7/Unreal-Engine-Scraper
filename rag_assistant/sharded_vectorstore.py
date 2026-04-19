@@ -33,7 +33,6 @@ class ShardedVectorStoreConfig:
     chunk_size: int = 2200
     chunk_overlap: int = 200
 
-   
     shard_level_index: int = 1
 
     # selecting top 5 shards 
